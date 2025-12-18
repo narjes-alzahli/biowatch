@@ -1,0 +1,19 @@
+# BioWatch Multi-Modal Object Detection Requirements
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Data processing
+pycocotools>=2.0.6
+
+# Training utilities
+tqdm>=4.65.0
+tensorboard>=2.13.0
+
+# Development
+pytest>=7.4.0
+black>=23.7.0
+flake8>=6.1.0

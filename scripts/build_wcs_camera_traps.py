@@ -46,11 +46,6 @@ from utils import AnnotationCollector
 # Prefer no_classes version (animal/person/vehicle categories)
 BBOX_ANNOTATIONS_URL = "https://lilablobssc.blob.core.windows.net/wcs/wcs_20220205_bboxes_no_classes.zip"
 BBOX_ANNOTATIONS_URL_WITH_CLASSES = "https://lilablobssc.blob.core.windows.net/wcs/wcs_20220205_bboxes_with_classes.zip"
-IMAGE_BASE_URLS = [
-    "https://storage.googleapis.com/public-datasets-lila/wcs-unzipped",
-    "https://lilawildlife.blob.core.windows.net/lila-wildlife/wcs-unzipped",
-    "http://us-west-2.opendata.source.coop.s3.amazonaws.com/agentmorris/lila-wildlife/wcs-unzipped"
-]
 
 # Category mapping - Using no_classes version which has: animal, person, vehicle
 # We'll process all three categories (animal, human, vehicle)
@@ -120,116 +115,135 @@ def download_annotations(output_file):
         return None
 
 
-def download_image(image_path, output_path, wcs_id=None, seq_id=None, local_source_dir=None):
-    """Copy image from local download or download from cloud storage.
+def build_local_file_map(local_source_dir):
+    """Build a fast lookup map of all available local image files.
     
-    Checks local files first (if local_source_dir provided), then falls back to URL download.
+    Returns a tuple: (file_map, filename_map)
+    - file_map: maps annotation paths to actual file paths
+    - filename_map: maps filenames to actual file paths (fallback for sequence ID mismatches)
+    This avoids thousands of filesystem stat() calls.
+    """
+    if not local_source_dir or not Path(local_source_dir).exists():
+        return {}, {}
     
-    WARNING: The file_name in annotations does NOT directly map to storage URLs.
-    Human images (file_name starts with 'humans/') are NOT available per LILA docs.
+    local_source_dir = Path(local_source_dir)
+    file_map = {}
+    filename_map = {}
+    
+    print(f"  Building file lookup map from {local_source_dir}...")
+    # Find all image files recursively
+    image_extensions = {'.jpg', '.jpeg', '.png'}
+    all_files = []
+    for ext in image_extensions:
+        all_files.extend(local_source_dir.rglob(f'*{ext}'))
+        all_files.extend(local_source_dir.rglob(f'*{ext.upper()}'))
+    
+    print(f"  Found {len(all_files):,} image files")
+    
+    # Build map: for each file, create all possible lookup keys
+    for file_path in tqdm(all_files, desc="  Indexing files", unit="file", total=len(all_files)):
+        # Get relative path from local_source_dir
+        try:
+            rel_path = file_path.relative_to(local_source_dir)
+        except ValueError:
+            continue
+        
+        # Build filename map (fallback for sequence ID mismatches)
+        filename = file_path.name
+        if filename not in filename_map:  # Use first match found
+            filename_map[filename] = file_path
+        
+        # Create lookup keys for all possible annotation paths
+        # Key format: "animals/0019/0918.jpg" or "vehicles/0019/0918.jpg" etc.
+        parts = rel_path.parts
+        
+        # If file is in animals/animals/0019/0918.jpg, create keys:
+        # - animals/animals/0019/0918.jpg (exact)
+        # - animals/0019/0918.jpg (without nested animals)
+        # - vehicles/0019/0918.jpg (alternative category)
+        if len(parts) >= 3:
+            if parts[0] == 'animals' and parts[1] == 'animals':
+                # Nested structure: animals/animals/0019/0918.jpg
+                numeric_part = '/'.join(parts[2:])  # "0019/0918.jpg"
+                file_map[f'animals/{numeric_part}'] = file_path
+                file_map[f'animals/animals/{numeric_part}'] = file_path
+                file_map[f'vehicles/{numeric_part}'] = file_path
+                file_map[f'humans/{numeric_part}'] = file_path
+            elif parts[0] == 'animals':
+                # Direct structure: animals/0019/0918.jpg
+                numeric_part = '/'.join(parts[1:])  # "0019/0918.jpg"
+                file_map[f'animals/{numeric_part}'] = file_path
+                file_map[f'animals/animals/{numeric_part}'] = file_path
+                file_map[f'vehicles/{numeric_part}'] = file_path
+                file_map[f'humans/{numeric_part}'] = file_path
+            elif parts[0] in ['vehicles', 'humans']:
+                # vehicles/0019/0918.jpg or humans/0019/0918.jpg
+                numeric_part = '/'.join(parts[1:])
+                file_map[f'{parts[0]}/{numeric_part}'] = file_path
+                file_map[f'animals/{numeric_part}'] = file_path
+                file_map[f'animals/animals/{numeric_part}'] = file_path
+        
+        # Also add exact relative path as key
+        file_map[str(rel_path)] = file_path
+    
+    print(f"  ✓ Built lookup map with {len(file_map):,} path entries")
+    print(f"  ✓ Built filename map with {len(filename_map):,} filename entries")
+    return file_map, filename_map
+
+
+def copy_local_image(image_path, output_path, local_file_map, filename_map=None):
+    """Copy image from local directory using pre-built file map.
+    
+    Uses pre-built file_map for fast lookups (avoids filesystem stat() calls).
+    Falls back to filename-only matching if path doesn't match (handles sequence ID mismatches).
+    Returns True if image was found and copied, False otherwise.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Skip human images - they're not available per LILA documentation
-    if image_path.startswith('humans/'):
+    if not local_file_map:
         return False
     
-    # FIRST: Try to find image in local download directory
-    if local_source_dir:
-        local_source_dir = Path(local_source_dir)
-        if local_source_dir.exists():
-            # Build list of paths to try (handles nested animals/animals/ structure)
-            paths_to_try = []
-            
-            # 1. Exact path as specified in annotation
-            paths_to_try.append(local_source_dir / image_path)
-            
-            # 2. Handle nested structure (animals/animals/...) if file_name starts with animals/
-            if image_path.startswith('animals/'):
-                numeric_part = '/'.join(image_path.split('/')[1:])  # e.g., "0001/0224.jpg"
-                paths_to_try.append(local_source_dir / 'animals' / 'animals' / numeric_part)
-                paths_to_try.append(local_source_dir / 'animals' / numeric_part)
-            
-            # 3. Handle vehicles/ prefix
-            elif image_path.startswith('vehicles/'):
-                numeric_part = '/'.join(image_path.split('/')[1:])
-                paths_to_try.append(local_source_dir / 'animals' / 'animals' / numeric_part)
-                paths_to_try.append(local_source_dir / 'vehicles' / numeric_part)
-                paths_to_try.append(local_source_dir / 'animals' / numeric_part)
-            
-            # 4. Handle humans/ prefix (try anyway, may not exist)
-            elif image_path.startswith('humans/'):
-                numeric_part = '/'.join(image_path.split('/')[1:])
-                for prefix in ['animals/animals', 'animals', 'humans', 'vehicles']:
-                    paths_to_try.append(local_source_dir / prefix / numeric_part)
-            
-            # 5. Unknown prefix - try all possibilities
-            else:
-                if '/' in image_path:
-                    parts = image_path.split('/')
-                    if len(parts) >= 2:
-                        numeric_part = '/'.join(parts[1:])
-                        for prefix in ['animals/animals', 'animals', 'vehicles']:
-                            paths_to_try.append(local_source_dir / prefix / numeric_part)
-            
-            # Try each path until we find one that exists
-            for test_path in paths_to_try:
-                if test_path.exists() and test_path.is_file():
-                    # Copy from local file
-                    import shutil
-                    shutil.copy2(test_path, output_path)
-                    return True
+    import shutil
     
-    # FALLBACK: If not found locally, try to download from URLs
-    # Try different path formats (prioritize most likely)
-    test_paths = []
+    # Try exact match first
+    if image_path in local_file_map:
+        source_path = local_file_map[image_path]
+        try:
+            shutil.copy2(source_path, output_path)
+            return True
+        except (FileNotFoundError, OSError):
+            # File was deleted between map building and now, skip
+            pass
     
-    # Strategy 1: Extract numeric folder structure and use animals/ prefix
-    # e.g., humans/0410/1262.jpg -> animals/0410/1262.jpg
-    # This is the most likely format based on website example
+    # Try alternative paths (handle category mismatches and nested structure)
     if '/' in image_path:
         parts = image_path.split('/')
         if len(parts) >= 2:
-            # Extract the numeric folder and filename
-            numeric_part = '/'.join(parts[1:])  # e.g., "0410/1262.jpg"
-            if numeric_part and not numeric_part.startswith('humans'):
-                test_paths.append(f'animals/{numeric_part}')
+            numeric_part = '/'.join(parts[1:])  # e.g., "0019/0918.jpg"
+            # Try with different category prefixes
+            for prefix in ['animals', 'animals/animals', 'vehicles', 'humans']:
+                alt_path = f'{prefix}/{numeric_part}'
+                if alt_path in local_file_map:
+                    source_path = local_file_map[alt_path]
+                    try:
+                        shutil.copy2(source_path, output_path)
+                        return True
+                    except (FileNotFoundError, OSError):
+                        # File was deleted, try next
+                        continue
     
-    # Strategy 2: Replace humans/ with animals/ (direct replacement)
-    if 'humans/' in image_path:
-        test_paths.append(image_path.replace('humans/', 'animals/'))
-    
-    # Strategy 3: Replace vehicles/ with animals/ (if exists)
-    if 'vehicles/' in image_path:
-        test_paths.append(image_path.replace('vehicles/', 'animals/'))
-    
-    # Strategy 4: Try original path (in case it's correct)
-    if not image_path.startswith('humans/'):
-        test_paths.append(image_path)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_paths = []
-    for p in test_paths:
-        if p and p not in seen:
-            seen.add(p)
-            unique_paths.append(p)
-    test_paths = unique_paths
-    
-    # Try each base URL with each path format
-    for base_url in IMAGE_BASE_URLS:
-        for test_path in test_paths:
+    # FALLBACK: Match by filename only (handles sequence ID mismatches)
+    # Annotation paths may have wrong sequence IDs, but filenames should match
+    if filename_map:
+        filename = Path(image_path).name
+        if filename in filename_map:
+            source_path = filename_map[filename]
             try:
-                url = f"{base_url}/{test_path}".replace('//', '/').replace(':/', '://')
-                response = requests.get(url, stream=True, timeout=10, allow_redirects=True)
-                if response.status_code == 200:
-                    with open(output_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                    return True
-            except Exception as e:
-                continue
+                shutil.copy2(source_path, output_path)
+                return True
+            except (FileNotFoundError, OSError):
+                pass
     
     return False
 
@@ -432,8 +446,26 @@ def main():
     temp_output_dir = Path('temp_wcs_camera_traps')
     temp_output_dir.mkdir(exist_ok=True)
     
-    # Initialize annotation collector
+    # Initialize annotation collector for temp folder
+    temp_annotations_file = temp_output_dir / 'annotations.json'
+    temp_ann_collector = AnnotationCollector(temp_annotations_file)
+    
+    # Also keep reference to main dataset collector for checking existing files
     ann_collector = AnnotationCollector(output_dir / 'annotations.json')
+    
+    # Build local file map once (if using local images)
+    local_file_map = {}
+    local_filename_map = {}
+    local_images_dir = Path(args.local_images) if hasattr(args, 'local_images') and Path(args.local_images).exists() else None
+    if local_images_dir:
+        print(f"\n{'='*70}")
+        print(f"Building local file lookup map...")
+        print(f"{'='*70}")
+        local_file_map, local_filename_map = build_local_file_map(local_images_dir)
+        if not local_file_map:
+            print(f"  ⚠ Warning: No files found in {local_images_dir}")
+    else:
+        print(f"\nNo local images directory found")
     
     # Process each category separately
     for category in ['animal', 'human', 'vehicle']:
@@ -456,34 +488,21 @@ def main():
         print(f"  Found {len(existing_files)} existing files in dataset")
         print(f"  Found {len(existing_annotated)} existing annotated images")
         
-        # Check for local images directory (only once)
-        if category == 'animal':
-            print(f"\nChecking for local image dataset...")
-            local_images_dir = Path(args.local_images) if hasattr(args, 'local_images') else None
-            if local_images_dir and local_images_dir.exists():
-                print(f"  ✓ Found local images directory: {local_images_dir}")
-                print(f"  Will use local files instead of downloading from URLs")
-            else:
-                local_image_zips = list(Path('zips').glob('wcs*.zip')) if Path('zips').exists() else []
-                if local_image_zips:
-                    print(f"  Found potential image zip files: {[z.name for z in local_image_zips]}")
-                    print(f"  Note: Will try to download from URLs if local directory not found.")
-                else:
-                    print(f"  No local image directory or zip files found")
-                    print(f"  Images will be downloaded from cloud storage URLs")
-        
         # Process images to temp folder for this category
-        local_images_dir = Path(args.local_images) if hasattr(args, 'local_images') and Path(args.local_images).exists() else None
-        if local_images_dir:
+        if local_file_map:
             print(f"\nCopying {category} images from local directory to temp folder...")
+            pbar_desc = f"Copying {category}"
         else:
-            print(f"\nDownloading {category} images to temp folder...")
+            print(f"\n⚠ No local images found - cannot process images without local directory")
+            print(f"  Please provide --local-images directory with downloaded images")
+            continue
+        
         downloaded = 0
         skipped = 0
         failed = 0
         temp_annotation_queue = []
         
-        pbar = tqdm(valid_images, desc=f"Downloading {category}", unit="img", total=len(valid_images))
+        pbar = tqdm(valid_images, desc=pbar_desc, unit="img", total=len(valid_images))
         for i, item in enumerate(pbar):
             img = item['image']
             bboxes = item['bboxes']
@@ -493,7 +512,7 @@ def main():
             file_name = img.get('file_name', '')
             if not file_name:
                 failed += 1
-                pbar.set_postfix({'downloaded': downloaded, 'failed': failed, 'skipped': skipped})
+                pbar.set_postfix({'copied': downloaded, 'failed': failed, 'skipped': skipped})
                 continue
             
             output_filename = Path(file_name).name
@@ -501,10 +520,10 @@ def main():
             # Skip if already annotated
             if output_filename in existing_annotated:
                 skipped += 1
-                pbar.set_postfix({'downloaded': downloaded, 'failed': failed, 'skipped': skipped})
+                pbar.set_postfix({'copied': downloaded, 'failed': failed, 'skipped': skipped})
                 continue
             
-            # Download image to temp folder
+            # Copy image to temp folder
             temp_path = temp_category_dir / output_filename
             
             # Handle duplicates in temp folder
@@ -520,24 +539,22 @@ def main():
             # Skip if already in final dataset
             if output_filename in existing_files:
                 skipped += 1
-                pbar.set_postfix({'downloaded': downloaded, 'failed': failed, 'skipped': skipped})
+                pbar.set_postfix({'copied': downloaded, 'failed': failed, 'skipped': skipped})
                 continue
             
             # Get additional image metadata for download attempts
             wcs_id = img.get('wcs_id')
             seq_id = img.get('seq_id')
             
-            # Use local images directory if provided
-            local_source_dir = args.local_images if hasattr(args, 'local_images') else None
-            
-            if not download_image(file_name, temp_path, wcs_id=wcs_id, seq_id=seq_id, local_source_dir=local_source_dir):
+            # Copy from local file map
+            if not copy_local_image(file_name, temp_path, local_file_map, local_filename_map):
                 failed += 1
                 # Show periodic status updates
                 total_attempts = downloaded + failed
                 if total_attempts % 50 == 0 and total_attempts > 0:
                     success_rate = downloaded * 100 // total_attempts if total_attempts > 0 else 0
                     print(f"\n  Status: {downloaded} ✓ | {failed} ✗ | Success rate: {success_rate}%")
-                pbar.set_postfix({'downloaded': downloaded, 'failed': failed, 'skipped': skipped})
+                pbar.set_postfix({'copied': downloaded, 'failed': failed, 'skipped': skipped})
                 continue
             
             # Get image dimensions
@@ -548,15 +565,36 @@ def main():
                 print(f"  Warning: Could not read image {temp_path.name}: {e}")
                 temp_path.unlink()
                 failed += 1
-                pbar.set_postfix({'downloaded': downloaded, 'failed': failed, 'skipped': skipped})
+                pbar.set_postfix({'copied': downloaded, 'failed': failed, 'skipped': skipped})
                 continue
             
             downloaded += 1
-            pbar.set_postfix({'downloaded': downloaded, 'failed': failed, 'skipped': skipped})
+            pbar.set_postfix({'copied': downloaded, 'failed': failed, 'skipped': skipped})
             
-            # Add to annotation queue (temp only - not added to main dataset yet)
+            # Add to temp annotation collector
+            # Convert bboxes format: from list of dicts with 'bbox' to format expected by add_image
+            bbox_list = []
+            for bbox_info in bboxes:
+                bbox_list.append({
+                    'bbox': bbox_info['bbox'],  # COCO format: [x, y, width, height]
+                    'category': category_name,
+                    'area': bbox_info.get('area', bbox_info['bbox'][2] * bbox_info['bbox'][3])
+                })
+            
+            # File path relative to temp_output_dir for annotations
+            rel_path = temp_path.relative_to(temp_output_dir)
+            temp_ann_collector.add_image(
+                file_path=f'rgb/{category_name}/{rel_path.name}',
+                modality='rgb',
+                category=category_name,
+                width=width,
+                height=height,
+                bboxes=bbox_list
+            )
+            
+            # Also keep annotation queue for backward compatibility
             temp_annotation_queue.append({
-                'file_name': str(temp_path.relative_to(temp_output_dir)),
+                'file_name': str(rel_path),
                 'bboxes': bboxes,
                 'width': width,
                 'height': height,
@@ -567,20 +605,17 @@ def main():
                 break
         
         pbar.close()
-        print(f"\n✓ Downloaded {downloaded} {category} images to temp folder")
+        print(f"\n✓ Copied {downloaded} {category} images to temp folder")
         if skipped > 0:
             print(f"  Skipped: {skipped} images (already in dataset)")
         if failed > 0:
             print(f"  ⚠ Failed: {failed} images")
-            print(f"\n⚠ WARNING: {failed} {category} images could not be downloaded via HTTP.")
-            print(f"  The file_name in annotations may not match actual storage paths.")
+            print(f"\n⚠ WARNING: {failed} {category} images could not be found in local directory.")
+            print(f"  The file_name in annotations may not match actual local file paths.")
             print(f"\n  Solutions:")
-            print(f"  1. Use cloud storage CLI tools (recommended for bulk download):")
-            print(f"     GCP: gsutil -m cp -r gs://public-datasets-lila/wcs-unzipped/ <local_dir>")
-            print(f"     AWS: aws s3 sync s3://us-west-2.opendata.source.coop/agentmorris/lila-wildlife/wcs-unzipped/ <local_dir>")
-            print(f"  2. Check LILA website for updated download instructions:")
-            print(f"     https://lila.science/datasets/wcs-camera-traps")
-            print(f"  3. Check if images are in a local zip file in zips/ folder")
+            print(f"  1. Check that all images are downloaded to {args.local_images}/")
+            print(f"  2. Verify the directory structure matches annotation paths")
+            print(f"  3. Some images may be in nested directories (e.g., animals/animals/...)")
         
         # Save annotation queue for this category
         annotation_queue_file = temp_output_dir / f'annotation_queue_{category}.json'
@@ -590,20 +625,28 @@ def main():
         print(f"  Saved annotation data for {len(temp_annotation_queue)} {category} images")
         print(f"  Annotation queue: {annotation_queue_file}")
     
+    # Save final annotations.json file
+    print(f"\n{'='*70}")
+    print(f"Saving annotations.json...")
+    print(f"{'='*70}")
+    temp_ann_collector.save()
+    
     print(f"\n✓ Files are in: {temp_output_dir}/")
     print(f"  - animal/")
     print(f"  - human/")
     print(f"  - vehicle/")
+    print(f"  - annotations.json")
     print(f"\nNote: Files are in temp folder. Review before adding to main dataset.")
     
     print("\n" + "=" * 70)
-    print("DOWNLOAD COMPLETE")
+    print("COPY COMPLETE")
     print("=" * 70)
     print(f"\nFiles are in temp folder: {temp_output_dir}/")
     print(f"  - animal/")
     print(f"  - human/")
     print(f"  - vehicle/")
-    print(f"\nAnnotation queues:")
+    print(f"  - annotations.json ({len(temp_ann_collector.images)} images, {len(temp_ann_collector.annotations)} annotations)")
+    print(f"\nAnnotation queues (for reference):")
     print(f"  - {temp_output_dir}/annotation_queue_animal.json")
     print(f"  - {temp_output_dir}/annotation_queue_human.json")
     print(f"  - {temp_output_dir}/annotation_queue_vehicle.json")

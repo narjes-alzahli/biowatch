@@ -5,34 +5,42 @@
 set -e
 
 SOURCE_DIR="/Users/narjes/biowatch"
-DEST_DIR="${1:-/path/to/destination/biowatch}"
+
+# Check if first argument is a method (http) or destination path
+if [ "$1" == "http" ]; then
+    # HTTP method - no destination needed
+    METHOD="http"
+    DEST_DIR=""
+elif [ -z "$1" ] || [ "$1" == "/path/to/destination/biowatch" ]; then
+    echo "Usage: $0 <destination_path> [method]"
+    echo "   OR: $0 http"
+    echo ""
+    echo "Methods:"
+    echo "  http     - Start HTTP server (EASIEST - no SSH needed, same WiFi)"
+    echo "  rsync    - Fast sync over network (requires SSH)"
+    echo "  tar      - Create compressed archive (for external drive/cloud)"
+    echo "  scp      - Secure copy over network (requires SSH)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 http                                    # Start HTTP server"
+    echo "  $0 user@remote:/path/to/biowatch rsync    # rsync to remote"
+    echo "  $0 /Volumes/ExternalDrive/biowatch tar    # create archive"
+    exit 1
+else
+    DEST_DIR="$1"
+    METHOD="${2:-rsync}"
+fi
 
 echo "=========================================="
 echo "BioWatch Dataset Transfer Script"
 echo "=========================================="
 echo ""
 echo "Source: $SOURCE_DIR"
-echo "Destination: $DEST_DIR"
-echo ""
-
-# Check if destination is provided
-if [ "$DEST_DIR" == "/path/to/destination/biowatch" ]; then
-    echo "Usage: $0 <destination_path> [method]"
-    echo ""
-    echo "Methods:"
-    echo "  1. http     - Start HTTP server (EASIEST - no SSH needed, same WiFi)"
-    echo "  2. rsync    - Fast sync over network (requires SSH)"
-    echo "  3. tar      - Create compressed archive (for external drive/cloud)"
-    echo "  4. scp      - Secure copy over network (requires SSH)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 http                    # Start HTTP server (download from other computer)"
-    echo "  $0 user@remote:/path/to/biowatch rsync"
-    echo "  $0 /Volumes/ExternalDrive/biowatch tar"
-    exit 1
+if [ -n "$DEST_DIR" ]; then
+    echo "Destination: $DEST_DIR"
 fi
-
-METHOD="${2:-rsync}"
+echo "Method: $METHOD"
+echo ""
 
 case "$METHOD" in
     http)
@@ -49,7 +57,20 @@ case "$METHOD" in
             IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
         fi
         
+        # Find available port (start from 8000, try up to 8010)
         PORT=8000
+        while lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1; do
+            PORT=$((PORT + 1))
+            if [ $PORT -gt 8010 ]; then
+                echo "Error: Could not find available port (tried 8000-8010)"
+                exit 1
+            fi
+        done
+        
+        if [ $PORT -ne 8000 ]; then
+            echo "Note: Port 8000 was in use, using port $PORT instead"
+            echo ""
+        fi
         
         echo "=========================================="
         echo "HTTP Server Starting..."
@@ -69,10 +90,13 @@ case "$METHOD" in
         cd "$SOURCE_DIR"
         ARCHIVE_NAME="dataset.tar.gz"
         
-        # Create archive in background or show progress
-        if command -v pv &> /dev/null; then
-            tar -czf - dataset/ temp_wcs_camera_traps/ | pv -s 15G > "$ARCHIVE_NAME"
+        # Check if archive already exists
+        if [ -f "$ARCHIVE_NAME" ]; then
+            echo "✓ Archive already exists: $ARCHIVE_NAME ($(du -h "$ARCHIVE_NAME" | cut -f1))"
+            echo "  Using existing archive (skip to save time)"
         else
+            # Create archive
+            echo "Creating archive (this takes 10-20 minutes)..."
             tar -czf "$ARCHIVE_NAME" \
                 --exclude='*.pyc' \
                 --exclude='__pycache__' \

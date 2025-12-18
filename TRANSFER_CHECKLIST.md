@@ -1,5 +1,30 @@
 # Dataset Transfer Checklist
 
+## 🚀 EASIEST METHOD (Same WiFi, No SSH Setup Needed)
+
+If both computers are on the same WiFi:
+
+1. **On THIS computer (source)**, run:
+   ```bash
+   ./scripts/transfer_dataset.sh http
+   ```
+   This starts a web server and creates a compressed archive.
+
+2. **On the OTHER computer**, open a web browser and go to the URL shown (e.g., `http://192.168.1.100:8000/`)
+
+3. **Download** `dataset.tar.gz` from the browser
+
+4. **Extract** on the other computer:
+   ```bash
+   tar -xzf dataset.tar.gz
+   ```
+
+That's it! No SSH, no network configuration needed.
+
+---
+
+## Other Methods (If HTTP doesn't work)
+
 Before transferring the dataset, gather this information from the **destination computer**:
 
 ## 1. Connection Details
@@ -67,7 +92,16 @@ curl -o /dev/null http://destination-ip:8000/test-file
 
 ## 4. Example Commands Based on Info
 
-Once you have the info, use these commands:
+### Easiest: HTTP Server (Same WiFi, No SSH)
+```bash
+# On THIS computer:
+./scripts/transfer_dataset.sh http
+
+# Then on OTHER computer, open browser to the URL shown
+# Download dataset.tar.gz and extract it
+```
+
+### If you have SSH set up:
 
 ### Example 1: Same network, Linux destination
 ```bash

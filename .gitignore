@@ -38,6 +38,7 @@ dataset_yolo_6ch/
 dataset/rgb/
 dataset/thermal/
 dataset/labels/
+dataset/annotations.json
 
 # Logs
 *.log

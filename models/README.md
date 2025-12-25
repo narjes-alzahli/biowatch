@@ -1,8 +1,10 @@
 # BioWatch Multi-Modal Object Detection Model
 
-Unified model for object detection using RGB and/or thermal images.
+⚠️ **NOTE: This README describes an older architecture (Faster R-CNN-based).**
 
-## Architecture
+**Current implementation uses YOLOv8 with 6-channel early fusion. See main `README.md` for current training instructions.**
+
+## Architecture (Legacy)
 
 The model supports three fusion strategies:
 

@@ -71,6 +71,13 @@ class BioWatchDataset(Dataset):
         # Filter images based on modality requirements
         self.valid_images = self._filter_images()
         
+        # Filter by split if split information exists
+        if self.mode and any('split' in img for img in self.valid_images):
+            self.valid_images = [
+                img for img in self.valid_images
+                if img.get('split', 'train') == self.mode
+            ]
+        
         # Build paired image mapping (for RGB+thermal pairs)
         self.paired_images = self._build_paired_mapping()
         
@@ -118,6 +125,12 @@ class BioWatchDataset(Dataset):
             if img['id'] not in self.img_to_anns:
                 continue
             
+            # Check if file actually exists (basic check)
+            file_path = self.dataset_root / file_name
+            if not file_path.exists():
+                # Skip images where file doesn't exist
+                continue
+            
             valid.append(img)
         
         return valid
@@ -156,22 +169,29 @@ class BioWatchDataset(Dataset):
         
         return paired
     
-    def _load_image(self, file_path: Path) -> torch.Tensor:
-        """Load and preprocess image."""
-        img = Image.open(file_path).convert('RGB')
+    def _load_image(self, file_path: Path) -> Optional[torch.Tensor]:
+        """Load and preprocess image. Returns None if file doesn't exist."""
+        if not file_path.exists():
+            return None
         
-        # Apply augmentation if training
-        if self.transform:
-            img = self.transform(img)
-        
-        # Resize
-        img = self.resize(img)
-        
-        # Convert to tensor and normalize
-        img = self.to_tensor(img)
-        img = self.normalize(img)
-        
-        return img
+        try:
+            img = Image.open(file_path).convert('RGB')
+            
+            # Apply augmentation if training
+            if self.transform:
+                img = self.transform(img)
+            
+            # Resize
+            img = self.resize(img)
+            
+            # Convert to tensor and normalize
+            img = self.to_tensor(img)
+            img = self.normalize(img)  # Normalize here
+            
+            return img
+        except Exception as e:
+            print(f"Warning: Failed to load {file_path}: {e}")
+            return None
     
     def _get_annotations(self, image_id: int) -> List[Dict]:
         """Get annotations for an image."""
@@ -232,6 +252,8 @@ class BioWatchDataset(Dataset):
                 if thermal_info:
                     thermal_path = self.dataset_root / thermal_info['file_name']
                     thermal_img = self._load_image(thermal_path)
+                    if thermal_img is None:
+                        thermal_img = None  # File doesn't exist, skip thermal
         
         elif 'thermal/' in file_name:
             thermal_path = self.dataset_root / file_name
@@ -244,6 +266,8 @@ class BioWatchDataset(Dataset):
                 if rgb_info:
                     rgb_path = self.dataset_root / rgb_info['file_name']
                     rgb_img = self._load_image(rgb_path)
+                    if rgb_img is None:
+                        rgb_img = None  # File doesn't exist, skip RGB
         
         # Determine modality
         if rgb_img is not None and thermal_img is not None:

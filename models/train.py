@@ -46,6 +46,19 @@ def main():
     parser.add_argument('--require-both', action='store_true',
                        help='Require both RGB and thermal (only use paired images)')
     
+    # GPU arguments
+    parser.add_argument('--device', type=str, default='auto',
+                       choices=['auto', 'cuda', 'cpu'] + [f'cuda:{i}' for i in range(8)],
+                       help='Device to use: auto (detect), cuda (GPU 0), cuda:0, cuda:1, etc., or cpu')
+    parser.add_argument('--num-workers', type=int, default=4,
+                       help='Number of data loading workers')
+    
+    # Performance optimization arguments
+    parser.add_argument('--no-mixed-precision', action='store_true',
+                       help='Disable mixed precision training (FP16) - uses more memory but may be more stable')
+    parser.add_argument('--gradient-checkpointing', action='store_true',
+                       help='Enable gradient checkpointing (saves ~50% memory, ~20% slower)')
+    
     # Other arguments
     parser.add_argument('--output-dir', type=Path, default=Path('outputs'),
                        help='Output directory')
@@ -67,12 +80,16 @@ def main():
         num_epochs=args.epochs,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
+        device=args.device,
+        num_workers=args.num_workers,
         dataset_path=args.dataset_path,
         annotations_file=args.annotations,
         use_rgb=args.use_rgb,
         use_thermal=args.use_thermal,
         require_both_modalities=args.require_both,
         use_augmentation=not args.no_augmentation,
+        use_mixed_precision=not args.no_mixed_precision,
+        use_gradient_checkpointing=args.gradient_checkpointing,
         output_dir=args.output_dir,
         checkpoint_dir=args.checkpoint_dir
     )

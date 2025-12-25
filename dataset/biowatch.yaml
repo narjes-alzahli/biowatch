@@ -1,0 +1,10 @@
+# BioWatch Multi-Modal Dataset (YOLO format)
+# Paths are relative to this file
+
+path: C:\Users\DevOps\Desktop\narjes_projects\biowatch\dataset
+train: images/train  # relative to path
+val: images/val      # relative to path
+
+# Classes
+nc: 3
+names: ['human', 'animal', 'vehicle']

@@ -4,7 +4,7 @@ Configuration for BioWatch multi-modal object detection model.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 @dataclass
 class ModelConfig:
@@ -23,6 +23,10 @@ class ModelConfig:
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
     
+    # GPU settings
+    device: str = "auto"  # "auto", "cuda", "cuda:0", "cuda:1", "cpu"
+    num_workers: int = 4  # Number of data loading workers
+    
     # Data settings
     dataset_path: Path = Path("dataset")
     annotations_file: Path = Path("dataset/annotations.json")
@@ -34,6 +38,14 @@ class ModelConfig:
     
     # Augmentation
     use_augmentation: bool = True
+    
+    # Class weights (for handling imbalanced datasets)
+    use_class_weights: bool = True  # If True, automatically compute class weights from dataset
+    class_weights: Optional[list] = None  # Manual class weights [animal, human, vehicle] or None for auto
+    
+    # Performance optimizations
+    use_mixed_precision: bool = True  # Use FP16 mixed precision training (saves ~50% memory, 1.5-2x speedup)
+    use_gradient_checkpointing: bool = False  # Trade compute for memory (saves ~50% memory, ~20% slower)
     
     # Output settings
     output_dir: Path = Path("outputs")

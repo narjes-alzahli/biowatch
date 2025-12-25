@@ -37,12 +37,12 @@ def check_torch():
                 total_memory = props.total_memory / (1024**3)  # GB
                 print(f"GPU {i} VRAM: {total_memory:.1f} GB")
                 
-                # Recommendations
-                if total_memory >= 16:
+                # Recommendations (using thresholds that account for ~11.99 GB reporting)
+                if total_memory >= 15.5:  # 16 GB
                     print(f"  ✓ Excellent! Can use batch_size=16, feature fusion")
-                elif total_memory >= 12:
+                elif total_memory >= 11.5:  # 12 GB
                     print(f"  ✓ Good! Can use batch_size=8, feature fusion")
-                elif total_memory >= 8:
+                elif total_memory >= 7.5:  # 8 GB
                     print(f"  ⚠️  OK. Use batch_size=4, early fusion")
                 else:
                     print(f"  ⚠️  Limited. Use batch_size=2, early fusion, smaller input size")
